@@ -1,17 +1,21 @@
 package sk.fleer.kopia
 
+import android.content.Intent
 import android.os.Bundle
 import android.widget.Button
 import android.widget.EditText
 import android.widget.ProgressBar
 import android.widget.Switch
 import android.widget.TextView
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import java.io.File
+import kotlin.coroutines.resume
 
 class MainActivity : AppCompatActivity() {
 
@@ -35,6 +39,23 @@ class MainActivity : AppCompatActivity() {
             button.text = if (video) "STIAHNUŤ VIDEO" else "STIAHNUŤ HUDBU"
         }
         button.setOnClickListener { start() }
+
+        takeSharedLink(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        takeSharedLink(intent)
+    }
+
+    /** Fills the field when a link arrives from another app's share sheet. */
+    private fun takeSharedLink(intent: Intent?) {
+        if (intent?.action != Intent.ACTION_SEND) return
+        val shared = intent.getStringExtra(Intent.EXTRA_TEXT) ?: return
+        // Share text is often "Title https://youtu.be/... " rather than a bare URL.
+        val url = Regex("""https?://\S+""").find(shared)?.value ?: shared
+        link.setText(url.trim())
+        status.text = "Odkaz prevzatý zo zdieľania."
     }
 
     private fun start() {
@@ -51,7 +72,20 @@ class MainActivity : AppCompatActivity() {
 
         lifecycleScope.launch {
             try {
-                val saved = withContext(Dispatchers.IO) { download(url, wantVideo) }
+                val media = withContext(Dispatchers.IO) { Youtube.resolve(url) }
+
+                var chosen: Stream? = null
+                if (wantVideo) {
+                    if (media.videos.isEmpty()) {
+                        throw Youtube.NotAvailable("Toto video sa nedá stiahnuť ako video.")
+                    }
+                    chosen = askQuality(media) ?: run {
+                        status.text = "Zrušené."
+                        return@launch
+                    }
+                }
+
+                val saved = withContext(Dispatchers.IO) { fetch(media, chosen) }
                 progress.progress = 100
                 status.text = "Hotovo!\n$saved"
             } catch (e: Exception) {
@@ -62,31 +96,43 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private suspend fun download(url: String, wantVideo: Boolean): String {
-        val media = Youtube.resolve(url, wantVideo)
-        report("Sťahujem: ${media.title}")
+    /** Shows the real download size per resolution - audio is always included. */
+    private suspend fun askQuality(media: Media): Stream? = suspendCancellableCoroutine { cont ->
+        val labels = media.videos.map { video ->
+            val mb = (video.bytes + media.audio.bytes) / 1024.0 / 1024.0
+            "${video.label ?: "${video.height}p"}  ·  ${"%.1f".format(mb)} MB"
+        }.toTypedArray()
 
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Vyber kvalitu")
+            .setItems(labels) { _, index -> cont.resume(media.videos[index]) }
+            .setOnCancelListener { cont.resume(null) }
+            .create()
+        cont.invokeOnCancellation { dialog.dismiss() }
+        dialog.show()
+    }
+
+    private fun fetch(media: Media, video: Stream?): String {
         val work = File(cacheDir, "work").apply { mkdirs() }
         val audioFile = File(work, "audio.m4a")
         val videoFile = File(work, "video.mp4")
         val muxed = File(work, "muxed.mp4")
-        listOf(audioFile, videoFile, muxed).forEach { it.delete() }
+        val temps = listOf(audioFile, videoFile, muxed)
+        temps.forEach { it.delete() }
 
         try {
             // Progress is weighted by byte count across both streams, so the bar
             // reflects actual work rather than jumping between two phases.
-            val totalBytes = media.audio.bytes + (media.video?.bytes ?: 0)
+            val totalBytes = media.audio.bytes + (video?.bytes ?: 0)
             var done = 0L
 
+            report("Sťahujem: ${media.title}")
             Downloader.fetch(media.audio, audioFile) { got, _ -> publish(done + got, totalBytes) }
             done += media.audio.bytes
 
-            val asVideo = wantVideo && media.video != null
             val result: File
-            if (asVideo) {
-                Downloader.fetch(media.video!!, videoFile) { got, _ ->
-                    publish(done + got, totalBytes)
-                }
+            if (video != null) {
+                Downloader.fetch(video, videoFile) { got, _ -> publish(done + got, totalBytes) }
                 report("Spájam...")
                 Muxer.combine(videoFile, audioFile, muxed)
                 result = muxed
@@ -96,9 +142,9 @@ class MainActivity : AppCompatActivity() {
             }
 
             report("Ukladám...")
-            return Library.publish(this, result, media, asVideo)
+            return Library.publish(this, result, media, video != null)
         } finally {
-            listOf(audioFile, videoFile, muxed).forEach { it.delete() }
+            temps.forEach { it.delete() }
         }
     }
 

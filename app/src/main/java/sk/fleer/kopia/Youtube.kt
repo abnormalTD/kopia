@@ -72,7 +72,7 @@ object Youtube {
         throw NotAvailable("V odkaze som nenašiel ID videa.")
     }
 
-    fun resolve(url: String, wantVideo: Boolean): Media {
+    fun resolve(url: String): Media {
         val id = videoId(url)
         // A bare player request gets "Sign in to confirm you're not a bot";
         // passing the visitorData from the watch page is what makes it pass.
@@ -87,18 +87,17 @@ object Youtube {
                 lastReason = status?.optString("reason").orEmpty().ifBlank { state }
                 continue
             }
-            val media = parse(response, client.userAgent, wantVideo) ?: continue
-            return media
+            parse(response, client.userAgent)?.let { return it }
         }
         throw NotAvailable(lastReason?.takeIf { it.isNotBlank() } ?: "Video sa nedá stiahnuť.")
     }
 
-    private fun parse(response: JSONObject, userAgent: String, wantVideo: Boolean): Media? {
+    private fun parse(response: JSONObject, userAgent: String): Media? {
         val streaming = response.optJSONObject("streamingData") ?: return null
         val formats = streaming.optJSONArray("adaptiveFormats") ?: return null
 
         var audio: Stream? = null
-        var video: Stream? = null
+        val videos = mutableListOf<Stream>()
         for (i in 0 until formats.length()) {
             val f = formats.getJSONObject(i)
             val url = f.optString("url").ifBlank { null } ?: continue
@@ -116,18 +115,16 @@ object Youtube {
             // AAC in MP4 and H.264 specifically: those are the two things every
             // Android device, TV and player handles, and MediaMuxer can put them
             // in an MP4 container without re-encoding. Opus/VP9/AV1 would need a
-            // WebM muxer or a transcode.
+            // WebM muxer or a transcode. This is also why 1080p is the ceiling -
+            // above that YouTube only ships VP9/AV1.
             if (mime.startsWith("audio/mp4")) {
                 if (audio == null || stream.bitrate > audio.bitrate) audio = stream
-            } else if (wantVideo && mime.contains("avc1") && stream.height in 1..1080) {
-                if (video == null || stream.height > video.height ||
-                    (stream.height == video.height && stream.bitrate > video.bitrate)
-                ) video = stream
+            } else if (mime.contains("avc1") && stream.height > 0) {
+                videos += stream
             }
         }
 
         if (audio == null) return null
-        if (wantVideo && video == null) return null
 
         val details = response.optJSONObject("videoDetails")
         return Media(
@@ -135,7 +132,12 @@ object Youtube {
             author = details?.optString("author").orEmpty().ifBlank { "YouTube" },
             seconds = details?.optString("lengthSeconds")?.toIntOrNull() ?: 0,
             audio = audio,
-            video = video,
+            // One entry per resolution (the fattest, i.e. best, of each), best
+            // first - YouTube lists several bitrates per height.
+            videos = videos
+                .groupBy { it.height }
+                .map { (_, group) -> group.maxBy { it.bitrate } }
+                .sortedByDescending { it.height },
         )
     }
 
@@ -214,5 +216,5 @@ data class Media(
     val author: String,
     val seconds: Int,
     val audio: Stream,
-    val video: Stream?,
+    val videos: List<Stream>,
 )

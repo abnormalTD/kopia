@@ -1,5 +1,6 @@
 package sk.fleer.kopia
 
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.net.HttpURLConnection
@@ -70,6 +71,93 @@ object Youtube {
             .find(text)?.let { return it.groupValues[1] }
         if (text.matches(Regex("""[A-Za-z0-9_-]{11}"""))) return text
         throw NotAvailable("V odkaze som nenašiel ID videa.")
+    }
+
+    fun playlistId(input: String): String? =
+        Regex("""[?&]list=([A-Za-z0-9_-]+)""").find(input.trim())?.groupValues?.get(1)
+            // Auto-generated "mix" playlists are endless and personalised; there
+            // is no fixed track list to download.
+            ?.takeUnless { it.startsWith("RD") }
+
+    /**
+     * Reads a playlist's track list out of the playlist page.
+     *
+     * Walks the JSON looking for entries anywhere rather than following a fixed
+     * path: YouTube moved this data from `playlistVideoRenderer` to
+     * `lockupViewModel` at some point, and a hardcoded path would simply have
+     * returned an empty list.
+     */
+    fun playlist(id: String): Playlist {
+        val html = get("https://www.youtube.com/playlist?list=$id", DESKTOP_UA)
+        val data = embeddedJson(html, "ytInitialData")
+            ?: throw NotAvailable("Playlist sa nepodarilo načítať.")
+
+        val entries = mutableListOf<JSONObject>()
+        collect(data, "lockupViewModel", entries)
+
+        val items = entries.mapNotNull { entry ->
+            if (entry.optString("contentType") != "LOCKUP_CONTENT_TYPE_VIDEO") return@mapNotNull null
+            val videoId = entry.optString("contentId").ifBlank { null } ?: return@mapNotNull null
+            val titles = mutableListOf<String>()
+            collectStrings(entry.optJSONObject("metadata"), "content", titles)
+            PlaylistItem(videoId, titles.firstOrNull()?.ifBlank { null } ?: videoId)
+        }.distinctBy { it.videoId }
+
+        if (items.isEmpty()) throw NotAvailable("V playliste som nenašiel žiadne videá.")
+
+        val titles = mutableListOf<String>()
+        collectStrings(data.optJSONObject("microformat"), "title", titles)
+        return Playlist(titles.firstOrNull()?.ifBlank { null } ?: "Playlist", items)
+    }
+
+    private fun embeddedJson(html: String, marker: String): JSONObject? {
+        val at = html.indexOf(marker)
+        if (at < 0) return null
+        val start = html.indexOf('{', at)
+        if (start < 0) return null
+        var depth = 0
+        var inString = false
+        var escaped = false
+        for (i in start until html.length) {
+            val c = html[i]
+            if (inString) {
+                when {
+                    escaped -> escaped = false
+                    c == '\\' -> escaped = true
+                    c == '"' -> inString = false
+                }
+                continue
+            }
+            when (c) {
+                '"' -> inString = true
+                '{' -> depth++
+                '}' -> {
+                    depth--
+                    if (depth == 0) return runCatching { JSONObject(html.substring(start, i + 1)) }.getOrNull()
+                }
+            }
+        }
+        return null
+    }
+
+    private fun collect(node: Any?, key: String, into: MutableList<JSONObject>) {
+        when (node) {
+            is JSONObject -> for (name in node.keys()) {
+                val value = node.get(name)
+                if (name == key && value is JSONObject) into += value else collect(value, key, into)
+            }
+            is JSONArray -> for (i in 0 until node.length()) collect(node.get(i), key, into)
+        }
+    }
+
+    private fun collectStrings(node: Any?, key: String, into: MutableList<String>) {
+        when (node) {
+            is JSONObject -> for (name in node.keys()) {
+                val value = node.get(name)
+                if (name == key && value is String) into += value else collectStrings(value, key, into)
+            }
+            is JSONArray -> for (i in 0 until node.length()) collectStrings(node.get(i), key, into)
+        }
     }
 
     fun resolve(url: String): Media {
@@ -218,3 +306,7 @@ data class Media(
     val audio: Stream,
     val videos: List<Stream>,
 )
+
+data class PlaylistItem(val videoId: String, val title: String)
+
+data class Playlist(val title: String, val items: List<PlaylistItem>)

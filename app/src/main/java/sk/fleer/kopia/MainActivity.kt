@@ -72,22 +72,16 @@ class MainActivity : AppCompatActivity() {
 
         lifecycleScope.launch {
             try {
-                val media = withContext(Dispatchers.IO) { Youtube.resolve(url) }
-
-                var chosen: Stream? = null
-                if (wantVideo) {
-                    if (media.videos.isEmpty()) {
-                        throw Youtube.NotAvailable("Toto video sa nedá stiahnuť ako video.")
-                    }
-                    chosen = askQuality(media) ?: run {
-                        status.text = "Zrušené."
-                        return@launch
-                    }
+                val playlistId = Youtube.playlistId(url)
+                val playlist = playlistId?.let {
+                    runCatching { withContext(Dispatchers.IO) { Youtube.playlist(it) } }.getOrNull()
                 }
 
-                val saved = withContext(Dispatchers.IO) { fetch(media, chosen) }
-                progress.progress = 100
-                status.text = "Hotovo!\n$saved"
+                if (playlist != null && playlist.items.size > 1 && askWholePlaylist(playlist)) {
+                    downloadPlaylist(playlist, wantVideo)
+                } else {
+                    downloadOne(url, wantVideo)
+                }
             } catch (e: Exception) {
                 status.text = e.message ?: e.toString()
             } finally {
@@ -95,6 +89,74 @@ class MainActivity : AppCompatActivity() {
             }
         }
     }
+
+    private suspend fun downloadOne(url: String, wantVideo: Boolean) {
+        val media = withContext(Dispatchers.IO) { Youtube.resolve(url) }
+        val chosen = chooseVideo(media, wantVideo) ?: return
+        val saved = withContext(Dispatchers.IO) { fetch(media, chosen) }
+        progress.progress = 100
+        status.text = "Hotovo!\n$saved"
+    }
+
+    private suspend fun downloadPlaylist(playlist: Playlist, wantVideo: Boolean) {
+        // The quality question is asked once, from the first track, and the same
+        // resolution is then used for the rest - nobody wants eleven dialogs.
+        var height: Int? = null
+        var failed = 0
+
+        for ((index, item) in playlist.items.withIndex()) {
+            val number = index + 1
+            report("$number/${playlist.items.size}: ${item.title}")
+            try {
+                val media = withContext(Dispatchers.IO) { Youtube.resolve(item.videoId) }
+                var chosen: Stream? = null
+                if (wantVideo && media.videos.isNotEmpty()) {
+                    if (height == null) {
+                        chosen = askQuality(media) ?: return
+                        height = chosen.height
+                    } else {
+                        val target = height
+                        chosen = media.videos.minByOrNull { kotlin.math.abs(it.height - target!!) }
+                    }
+                }
+                withContext(Dispatchers.IO) {
+                    fetch(media, chosen, album = playlist.title, track = number)
+                }
+            } catch (e: Exception) {
+                // One unavailable track should not abandon the other ten.
+                failed++
+            }
+            progress.progress = number * 100 / playlist.items.size
+        }
+
+        val done = playlist.items.size - failed
+        status.text = buildString {
+            append("Hotovo! $done z ${playlist.items.size} do ")
+            append(if (wantVideo) "Movies/Kopia" else "Music/Kopia")
+            if (failed > 0) append("\n$failed sa nepodarilo stiahnuť.")
+        }
+    }
+
+    private suspend fun chooseVideo(media: Media, wantVideo: Boolean): Stream? {
+        if (!wantVideo) return null
+        if (media.videos.isEmpty()) {
+            throw Youtube.NotAvailable("Toto video sa nedá stiahnuť ako video.")
+        }
+        return askQuality(media)
+    }
+
+    private suspend fun askWholePlaylist(playlist: Playlist): Boolean =
+        suspendCancellableCoroutine { cont ->
+            val dialog = AlertDialog.Builder(this)
+                .setTitle(playlist.title)
+                .setMessage("Playlist má ${playlist.items.size} videí.")
+                .setPositiveButton("Stiahnuť všetky") { _, _ -> cont.resume(true) }
+                .setNegativeButton("Len toto jedno") { _, _ -> cont.resume(false) }
+                .setOnCancelListener { cont.resume(false) }
+                .create()
+            cont.invokeOnCancellation { dialog.dismiss() }
+            dialog.show()
+        }
 
     /** Shows the real download size per resolution - audio is always included. */
     private suspend fun askQuality(media: Media): Stream? = suspendCancellableCoroutine { cont ->
@@ -112,7 +174,12 @@ class MainActivity : AppCompatActivity() {
         dialog.show()
     }
 
-    private fun fetch(media: Media, video: Stream?): String {
+    private fun fetch(
+        media: Media,
+        video: Stream?,
+        album: String? = null,
+        track: Int? = null,
+    ): String {
         val work = File(cacheDir, "work").apply { mkdirs() }
         val audioFile = File(work, "audio.m4a")
         val videoFile = File(work, "video.mp4")
@@ -125,15 +192,18 @@ class MainActivity : AppCompatActivity() {
             // reflects actual work rather than jumping between two phases.
             val totalBytes = media.audio.bytes + (video?.bytes ?: 0)
             var done = 0L
+            val single = track == null
 
-            report("Sťahujem: ${media.title}")
-            Downloader.fetch(media.audio, audioFile) { got, _ -> publish(done + got, totalBytes) }
+            Downloader.fetch(media.audio, audioFile) { got, _ ->
+                if (single) publish(done + got, totalBytes)
+            }
             done += media.audio.bytes
 
             val result: File
             if (video != null) {
-                Downloader.fetch(video, videoFile) { got, _ -> publish(done + got, totalBytes) }
-                report("Spájam...")
+                Downloader.fetch(video, videoFile) { got, _ ->
+                    if (single) publish(done + got, totalBytes)
+                }
                 Muxer.combine(videoFile, audioFile, muxed)
                 result = muxed
             } else {
@@ -141,8 +211,7 @@ class MainActivity : AppCompatActivity() {
                 result = audioFile
             }
 
-            report("Ukladám...")
-            return Library.publish(this, result, media, video != null)
+            return Library.publish(this, result, media, video != null, album, track)
         } finally {
             temps.forEach { it.delete() }
         }

@@ -16,8 +16,18 @@ import java.io.IOException
  */
 object Library {
 
-    fun publish(context: Context, source: File, media: Media, isVideo: Boolean): String {
-        val name = filename(media.title, if (isVideo) "mp4" else "m4a")
+    fun publish(
+        context: Context,
+        source: File,
+        media: Media,
+        isVideo: Boolean,
+        album: String? = null,
+        track: Int? = null,
+    ): String {
+        // Numbering the filename keeps album tracks in order even in file
+        // managers and players that ignore the TRACK column.
+        val prefix = track?.let { "%02d - ".format(it) }.orEmpty()
+        val name = filename(prefix + media.title, if (isVideo) "mp4" else "m4a")
         val collection = if (isVideo) {
             MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
         } else {
@@ -33,6 +43,8 @@ object Library {
             put(MediaStore.MediaColumns.IS_PENDING, 1)
             if (!isVideo) {
                 put(MediaStore.Audio.Media.ARTIST, media.author)
+                album?.let { put(MediaStore.Audio.Media.ALBUM, it) }
+                track?.let { put(MediaStore.Audio.Media.TRACK, it) }
             }
             if (media.seconds > 0) {
                 put(MediaStore.MediaColumns.DURATION, media.seconds * 1000)

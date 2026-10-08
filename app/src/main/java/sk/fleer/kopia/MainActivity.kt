@@ -25,6 +25,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var progress: ProgressBar
     private lateinit var status: TextView
 
+    private var lastFailures: List<Pair<String, String>> = emptyList()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
@@ -39,6 +41,7 @@ class MainActivity : AppCompatActivity() {
             button.text = if (video) "STIAHNUŤ VIDEO" else "STIAHNUŤ HUDBU"
         }
         button.setOnClickListener { start() }
+        status.setOnClickListener { if (lastFailures.isNotEmpty()) showFailures() }
 
         takeSharedLink(intent)
     }
@@ -102,13 +105,13 @@ class MainActivity : AppCompatActivity() {
         // The quality question is asked once, from the first track, and the same
         // resolution is then used for the rest - nobody wants eleven dialogs.
         var height: Int? = null
-        var failed = 0
+        val failures = mutableListOf<Pair<String, String>>()
 
         for ((index, item) in playlist.items.withIndex()) {
             val number = index + 1
             report("$number/${playlist.items.size}: ${item.title}")
             try {
-                val media = withContext(Dispatchers.IO) { Youtube.resolve(item.videoId) }
+                val media = resolveWithRetry(item.videoId)
                 var chosen: Stream? = null
                 if (wantVideo && media.videos.isNotEmpty()) {
                     if (height == null) {
@@ -123,17 +126,41 @@ class MainActivity : AppCompatActivity() {
                     fetch(media, chosen, album = playlist.title, track = number)
                 }
             } catch (e: Exception) {
-                // One unavailable track should not abandon the other ten.
-                failed++
+                // One unavailable track should not abandon the other ten - but
+                // keep the reason, or nobody can tell a blocked video from a
+                // dropped connection.
+                failures += item.title to (e.message ?: e.javaClass.simpleName)
             }
             progress.progress = number * 100 / playlist.items.size
         }
 
-        val done = playlist.items.size - failed
+        showResult(playlist, wantVideo, failures)
+    }
+
+    /** One transient network hiccup should not cost a whole track. */
+    private suspend fun resolveWithRetry(videoId: String): Media = withContext(Dispatchers.IO) {
+        try {
+            Youtube.resolve(videoId)
+        } catch (first: Exception) {
+            if (first is Youtube.NotAvailable) throw first  // a refusal, not a glitch
+            Thread.sleep(1500)
+            Youtube.resolve(videoId)
+        }
+    }
+
+    private fun showResult(
+        playlist: Playlist,
+        wantVideo: Boolean,
+        failures: List<Pair<String, String>>,
+    ) {
+        lastFailures = failures
+        val done = playlist.items.size - failures.size
+        val folder = if (wantVideo) "Movies/Kopia" else "Music/Kopia"
         status.text = buildString {
-            append("Hotovo! $done z ${playlist.items.size} do ")
-            append(if (wantVideo) "Movies/Kopia" else "Music/Kopia")
-            if (failed > 0) append("\n$failed sa nepodarilo stiahnuť.")
+            append("Hotovo! $done z ${playlist.items.size} do $folder")
+            if (failures.isNotEmpty()) {
+                append("\n${failures.size} sa nepodarilo - klepni sem pre dôvod.")
+            }
         }
     }
 
@@ -215,6 +242,15 @@ class MainActivity : AppCompatActivity() {
         } finally {
             temps.forEach { it.delete() }
         }
+    }
+
+    private fun showFailures() {
+        val text = lastFailures.joinToString("\n\n") { (title, reason) -> "• $title\n   $reason" }
+        AlertDialog.Builder(this)
+            .setTitle("Nepodarilo sa stiahnuť")
+            .setMessage(text)
+            .setPositiveButton("Zavrieť", null)
+            .show()
     }
 
     private fun publish(done: Long, total: Long) {

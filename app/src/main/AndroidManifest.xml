@@ -5,7 +5,7 @@
 
     <application
         android:label="@string/app_name"
-        android:icon="@android:drawable/stat_sys_download"
+        android:icon="@mipmap/ic_launcher"
         android:theme="@style/Theme.Kopia"
         android:allowBackup="true">
         <activity

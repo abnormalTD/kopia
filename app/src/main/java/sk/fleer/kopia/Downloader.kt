@@ -36,27 +36,37 @@ object Downloader {
         }
     }
 
+    /** The server said no. Retrying will not change its mind. */
+    class Refused(message: String) : IOException(message)
+
     private fun chunk(stream: Stream, from: Long, to: Long): ByteArray {
-        var failure: Exception? = null
-        repeat(ATTEMPTS) { attempt ->
-            try {
-                val conn = (URL(stream.url).openConnection() as HttpURLConnection).apply {
-                    connectTimeout = 20_000
-                    readTimeout = 30_000
-                    setRequestProperty("User-Agent", stream.userAgent)
-                    setRequestProperty("Accept", "*/*")
-                    setRequestProperty("Range", "bytes=$from-$to")
-                }
-                try {
-                    return conn.inputStream.use { it.readBytes() }
-                } finally {
-                    conn.disconnect()
-                }
-            } catch (e: Exception) {
-                failure = e
-                Thread.sleep(1000L * (attempt + 1))
+        var lastProblem = ""
+        for (attempt in 1..ATTEMPTS) {
+            val conn = (URL(stream.url).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 20_000
+                readTimeout = 30_000
+                setRequestProperty("User-Agent", stream.userAgent)
+                setRequestProperty("Accept", "*/*")
+                setRequestProperty("Range", "bytes=$from-$to")
             }
+            try {
+                val code = conn.responseCode
+                when {
+                    code == HttpURLConnection.HTTP_PARTIAL ->
+                        return conn.inputStream.use { it.readBytes() }
+                    code == 403 || code == 404 || code == 410 ->
+                        throw Refused("Server odmietol sťahovanie (HTTP $code) na bajte $from.")
+                    else -> lastProblem = "HTTP $code"
+                }
+            } catch (e: Refused) {
+                throw e
+            } catch (e: IOException) {
+                lastProblem = e.message ?: e.javaClass.simpleName
+            } finally {
+                conn.disconnect()
+            }
+            if (attempt < ATTEMPTS) Thread.sleep(1000L * attempt)
         }
-        throw IOException("Sťahovanie zlyhalo na bajte $from", failure)
+        throw IOException("Sťahovanie zlyhalo na bajte $from ($lastProblem).")
     }
 }

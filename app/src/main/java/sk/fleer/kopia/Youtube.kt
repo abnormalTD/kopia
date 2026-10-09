@@ -14,11 +14,15 @@ import java.net.URL
  * talks SABR (protobuf request/response) - so reconstructing the web player is
  * both hard and pointless here. But a few of YouTube's app clients still answer
  * the plain InnerTube player endpoint with ordinary direct URLs, and need no JS
- * player to do it. Those are the clients used below.
+ * player to do it.
  *
- * Measured 2026-10-08: ANDROID and IOS have gone SABR-only too (they answer OK
- * but every format comes back without a url), so only these two are left. Expect
- * that to keep shrinking.
+ * Only VISIONOS is usable, measured 2026-10-09. ANDROID and IOS have gone
+ * SABR-only (OK, but no format carries a url). ANDROID_VR looks like a fallback
+ * and is a trap: its URLs serve the first megabyte or two and then answer
+ * HTTP 403, because downloads through it need a GVS PO token (yt-dlp marks it
+ * required). Falling back to it turned an honest "not available" into a
+ * megabyte of wasted download and a confusing error. If VISIONOS refuses a
+ * video, nothing here can fetch it - say so and stop.
  */
 object Youtube {
 
@@ -47,18 +51,6 @@ object Youtube {
                 "deviceModel" to "RealityDevice17,1",
                 "osName" to "visionOS",
                 "osVersion" to "26.5.23O471",
-            ),
-        ),
-        Client(
-            name = "ANDROID_VR", version = "1.65.10", contextName = 28,
-            userAgent = "com.google.android.apps.youtube.vr.oculus/1.65.10 " +
-                "(Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
-            extra = mapOf(
-                "deviceMake" to "Oculus",
-                "deviceModel" to "Quest 3",
-                "androidSdkVersion" to 32,
-                "osName" to "Android",
-                "osVersion" to "12L",
             ),
         ),
     )

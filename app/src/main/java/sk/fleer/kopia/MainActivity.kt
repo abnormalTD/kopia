@@ -3,6 +3,7 @@ package sk.fleer.kopia
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.view.View
@@ -71,6 +72,26 @@ class MainActivity : AppCompatActivity() {
         }
 
         takeSharedLink(intent)
+        if (savedInstanceState == null) checkForUpdate()
+    }
+
+    /**
+     * Quietly asks GitHub whether a newer release exists; any failure just means
+     * no button. One tap opens the APK itself, not a page to search through.
+     */
+    private fun checkForUpdate() {
+        val update = findViewById<Button>(R.id.update)
+        val installed = packageManager.getPackageInfo(packageName, 0).versionName ?: return
+        lifecycleScope.launch {
+            val release = runCatching { withContext(Dispatchers.IO) { Updates.latest() } }.getOrNull()
+                ?: return@launch
+            if (!Updates.isNewer(release.version, installed)) return@launch
+            update.text = "NOVÁ VERZIA ${release.version.removePrefix("v")} – STIAHNUŤ"
+            update.visibility = View.VISIBLE
+            update.setOnClickListener {
+                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(release.apkUrl)))
+            }
+        }
     }
 
     override fun onNewIntent(intent: Intent) {

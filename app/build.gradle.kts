@@ -1,6 +1,17 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+}
+
+// The release key lives outside the repository, in ~/.kopia (see the
+// "kópia-kľúč" backup). Without it a release build fails loudly instead of
+// producing something signed with a different key - which would refuse to
+// install over every copy already out there.
+val releaseKey = Properties().apply {
+    val file = File(System.getProperty("user.home"), ".kopia/keystore.properties")
+    if (file.isFile) file.inputStream().use { load(it) }
 }
 
 android {
@@ -11,12 +22,24 @@ android {
         applicationId = "sk.fleer.kopia"
         minSdk = 29
         targetSdk = 35
-        versionCode = 11
-        versionName = "0.11"
+        versionCode = 100
+        versionName = "1.0"
+    }
+
+    signingConfigs {
+        create("release") {
+            if (releaseKey.isNotEmpty()) {
+                storeFile = File(releaseKey.getProperty("storeFile"))
+                storePassword = releaseKey.getProperty("storePassword")
+                keyAlias = releaseKey.getProperty("keyAlias")
+                keyPassword = releaseKey.getProperty("keyPassword")
+            }
+        }
     }
 
     buildTypes {
         release {
+            signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(

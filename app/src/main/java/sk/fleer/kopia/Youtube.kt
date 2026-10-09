@@ -41,19 +41,28 @@ object Youtube {
         val extra: Map<String, Any>,
     )
 
-    private val clients = listOf(
-        Client(
-            name = "VISIONOS", version = "1.02", contextName = 101,
-            userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) " +
-                "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15",
-            extra = mapOf(
-                "deviceMake" to "Apple",
-                "deviceModel" to "RealityDevice17,1",
-                "osName" to "visionOS",
-                "osVersion" to "26.5.23O471",
-            ),
+    private val client = Client(
+        name = "VISIONOS", version = "1.02", contextName = 101,
+        userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) " +
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15",
+        extra = mapOf(
+            "deviceMake" to "Apple",
+            "deviceModel" to "RealityDevice17,1",
+            "osName" to "visionOS",
+            "osVersion" to "26.5.23O471",
         ),
     )
+
+    private const val ATTEMPTS = 3
+
+    /**
+     * The visitor identity, kept between videos. It is not tied to the video whose
+     * page it came from (measured: one token served four other tracks fine), and
+     * getting it costs a ~1.3 MB watch page - per track, that was ~14 MB of HTML
+     * for an 11-song playlist. Refreshed only after a refusal.
+     */
+    @Volatile
+    private var visitor: String? = null
 
     class NotAvailable(message: String) : IOException(message)
 
@@ -152,24 +161,41 @@ object Youtube {
         }
     }
 
+    /**
+     * A refusal is retried with a fresh visitor identity. It is not reliably
+     * final: a playlist track that VISIONOS refused once downloaded fine on the
+     * next run, while the same client answered 15 of 15 back-to-back requests
+     * cleanly. Genuinely blocked videos just cost two extra small requests.
+     */
     fun resolve(url: String): Media {
         val id = videoId(url)
-        // A bare player request gets "Sign in to confirm you're not a bot";
-        // passing the visitorData from the watch page is what makes it pass.
-        val visitorData = visitorData(id)
-        var lastReason: String? = null
+        var problem = "Video sa nedá stiahnuť."
 
-        for (client in clients) {
-            val response = player(id, client, visitorData)
-            val status = response.optJSONObject("playabilityStatus")
-            val state = status?.optString("status")
-            if (state != "OK") {
-                lastReason = status?.optString("reason").orEmpty().ifBlank { state }
-                continue
+        for (attempt in 1..ATTEMPTS) {
+            if (attempt > 1) {
+                visitor = null
+                Thread.sleep(2000L * (attempt - 1))
             }
-            parse(response, client.userAgent)?.let { return it }
+            try {
+                // A bare player request gets "Sign in to confirm you're not a
+                // bot"; the visitorData from a watch page is what makes it pass.
+                val identity = visitor ?: visitorData(id).also { visitor = it }
+                val response = player(id, client, identity)
+                val status = response.optJSONObject("playabilityStatus")
+                val state = status?.optString("status").orEmpty()
+                if (state == "OK") {
+                    parse(response, client.userAgent)?.let { return it }
+                    problem = "YouTube vrátil video bez priamych adries."
+                } else {
+                    problem = status?.optString("reason").orEmpty().ifBlank { state }
+                }
+            } catch (e: IOException) {
+                problem = e.message ?: e.javaClass.simpleName
+            } catch (e: org.json.JSONException) {
+                problem = "Neúplná odpoveď od YouTube."
+            }
         }
-        throw NotAvailable(lastReason?.takeIf { it.isNotBlank() } ?: "Video sa nedá stiahnuť.")
+        throw NotAvailable(problem)
     }
 
     private fun parse(response: JSONObject, userAgent: String): Media? {

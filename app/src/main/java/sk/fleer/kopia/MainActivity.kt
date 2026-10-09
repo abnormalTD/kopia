@@ -111,7 +111,7 @@ class MainActivity : AppCompatActivity() {
             val number = index + 1
             report("$number/${playlist.items.size}: ${item.title}")
             try {
-                val media = resolveWithRetry(item.videoId)
+                val media = withContext(Dispatchers.IO) { Youtube.resolve(item.videoId) }
                 var chosen: Stream? = null
                 if (wantVideo && media.videos.isNotEmpty()) {
                     if (height == null) {
@@ -135,17 +135,6 @@ class MainActivity : AppCompatActivity() {
         }
 
         showResult(playlist, wantVideo, failures)
-    }
-
-    /** One transient network hiccup should not cost a whole track. */
-    private suspend fun resolveWithRetry(videoId: String): Media = withContext(Dispatchers.IO) {
-        try {
-            Youtube.resolve(videoId)
-        } catch (first: Exception) {
-            if (first is Youtube.NotAvailable) throw first  // a refusal, not a glitch
-            Thread.sleep(1500)
-            Youtube.resolve(videoId)
-        }
     }
 
     private fun showResult(

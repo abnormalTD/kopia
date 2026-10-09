@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Notification icon: Android draws it from alpha only, so a plain white
+     silhouette - the arrow from the launcher icon without its sheets. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M11,3h2v10.2l3.6,-3.6L18,11l-6,6l-6,-6l1.4,-1.4L11,13.2z M5,19h14v2H5z" />
+</vector>

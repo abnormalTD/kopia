@@ -1,22 +1,36 @@
 package sk.fleer.kopia
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
+import android.view.View
 import android.widget.Button
 import android.widget.EditText
 import android.widget.ProgressBar
 import android.widget.Switch
 import android.widget.TextView
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
-import java.io.File
 import kotlin.coroutines.resume
 
+/**
+ * The screen only decides *what* to download - asking about playlists and
+ * quality - and then hands a finished [Job] to [DownloadService]. Everything it
+ * shows comes from [Downloads.state], so after a rotation it simply shows the
+ * truth again instead of a restored, frozen progress bar.
+ */
 class MainActivity : AppCompatActivity() {
 
     private lateinit var link: EditText
@@ -25,7 +39,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var progress: ProgressBar
     private lateinit var status: TextView
 
-    private var lastFailures: List<Pair<String, String>> = emptyList()
+    /** True while this screen is still asking questions before a download starts. */
+    private var asking = false
+
+    // Downloads work without it; the user just would not see the notification.
+    private val askNotifications =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -41,7 +60,15 @@ class MainActivity : AppCompatActivity() {
             button.text = if (video) "STIAHNUŤ VIDEO" else "STIAHNUŤ HUDBU"
         }
         button.setOnClickListener { start() }
-        status.setOnClickListener { if (lastFailures.isNotEmpty()) showFailures() }
+        status.setOnClickListener {
+            if (Downloads.state.value.failures.isNotEmpty()) showFailures()
+        }
+
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                Downloads.state.collect { render(it) }
+            }
+        }
 
         takeSharedLink(intent)
     }
@@ -51,6 +78,13 @@ class MainActivity : AppCompatActivity() {
         takeSharedLink(intent)
     }
 
+    private fun render(state: Downloads.State) {
+        status.text = state.line
+        progress.visibility = if (state.running) View.VISIBLE else View.INVISIBLE
+        progress.progress = state.percent
+        button.isEnabled = !state.running && !asking
+    }
+
     /** Fills the field when a link arrives from another app's share sheet. */
     private fun takeSharedLink(intent: Intent?) {
         if (intent?.action != Intent.ACTION_SEND) return
@@ -58,117 +92,113 @@ class MainActivity : AppCompatActivity() {
         // Share text is often "Title https://youtu.be/... " rather than a bare URL.
         val url = Regex("""https?://\S+""").find(shared)?.value ?: shared
         link.setText(url.trim())
-        status.text = "Odkaz prevzatý zo zdieľania."
+        if (!Downloads.state.value.running) Downloads.say("Odkaz prevzatý zo zdieľania.")
     }
 
     private fun start() {
         val url = link.text.toString().trim()
         if (url.isEmpty()) {
-            status.text = "Najprv vlož odkaz."
+            Downloads.say("Najprv vlož odkaz.")
             return
         }
         val wantVideo = videoSwitch.isChecked
+        requestNotificationsOnce()
 
+        asking = true
         button.isEnabled = false
-        progress.progress = 0
-        status.text = "Zisťujem..."
+        Downloads.say("Zisťujem...")
 
         lifecycleScope.launch {
             try {
-                val playlistId = Youtube.playlistId(url)
-                val playlist = playlistId?.let {
-                    runCatching { withContext(Dispatchers.IO) { Youtube.playlist(it) } }.getOrNull()
-                }
-
-                if (playlist != null && playlist.items.size > 1 && askWholePlaylist(playlist)) {
-                    downloadPlaylist(playlist, wantVideo)
-                } else {
-                    downloadOne(url, wantVideo)
-                }
+                decide(url, wantVideo)?.let { launchDownload(it) }
+                    ?: Downloads.say("Zrušené.")
+            } catch (e: CancellationException) {
+                // The screen went away mid-dialog (e.g. rotation). Nothing was
+                // started; leave a clean slate rather than a "cancelled" message.
+                Downloads.say("")
+                throw e
             } catch (e: Exception) {
-                status.text = e.message ?: e.toString()
+                Downloads.say(e.message ?: e.toString())
             } finally {
-                button.isEnabled = true
+                asking = false
+                render(Downloads.state.value)
             }
         }
     }
 
-    private suspend fun downloadOne(url: String, wantVideo: Boolean) {
-        val media = withContext(Dispatchers.IO) { Youtube.resolve(url) }
-        val chosen = chooseVideo(media, wantVideo) ?: return
-        val saved = withContext(Dispatchers.IO) { fetch(media, chosen) }
-        progress.progress = 100
-        status.text = "Hotovo!\n$saved"
-    }
-
-    private suspend fun downloadPlaylist(playlist: Playlist, wantVideo: Boolean) {
-        // The quality question is asked once, from the first track, and the same
-        // resolution is then used for the rest - nobody wants eleven dialogs.
-        var height: Int? = null
-        val failures = mutableListOf<Pair<String, String>>()
-
-        for ((index, item) in playlist.items.withIndex()) {
-            val number = index + 1
-            report("$number/${playlist.items.size}: ${item.title}")
-            try {
-                val media = withContext(Dispatchers.IO) { Youtube.resolve(item.videoId) }
-                var chosen: Stream? = null
-                if (wantVideo && media.videos.isNotEmpty()) {
-                    if (height == null) {
-                        chosen = askQuality(media) ?: return
-                        height = chosen.height
-                    } else {
-                        val target = height
-                        chosen = media.videos.minByOrNull { kotlin.math.abs(it.height - target!!) }
-                    }
-                }
-                withContext(Dispatchers.IO) {
-                    fetch(media, chosen, album = playlist.title, track = number)
-                }
-            } catch (e: Exception) {
-                // One unavailable track should not abandon the other ten - but
-                // keep the reason, or nobody can tell a blocked video from a
-                // dropped connection.
-                failures += item.title to (e.message ?: e.javaClass.simpleName)
-            }
-            progress.progress = number * 100 / playlist.items.size
+    /** Works out the job, or null if the user backed out of a dialog. */
+    private suspend fun decide(url: String, wantVideo: Boolean): Job? {
+        val singleId = runCatching { Youtube.videoId(url) }.getOrNull()
+        val playlist = Youtube.playlistId(url)?.let { id ->
+            runCatching { withContext(Dispatchers.IO) { Youtube.playlist(id) } }.getOrNull()
         }
 
-        showResult(playlist, wantVideo, failures)
-    }
-
-    private fun showResult(
-        playlist: Playlist,
-        wantVideo: Boolean,
-        failures: List<Pair<String, String>>,
-    ) {
-        lastFailures = failures
-        val done = playlist.items.size - failures.size
-        val folder = if (wantVideo) "Movies/Kopia" else "Music/Kopia"
-        status.text = buildString {
-            append("Hotovo! $done z ${playlist.items.size} do $folder")
-            if (failures.isNotEmpty()) {
-                append("\n${failures.size} sa nepodarilo - klepni sem pre dôvod.")
-            }
+        val wholePlaylist = when {
+            playlist == null || playlist.items.size < 2 -> false
+            // A shared playlist link carries no video of its own, so "only this
+            // one" would have nothing to point at.
+            singleId == null -> true
+            else -> askWholePlaylist(playlist) ?: return null
         }
-    }
 
-    private suspend fun chooseVideo(media: Media, wantVideo: Boolean): Stream? {
-        if (!wantVideo) return null
-        if (media.videos.isEmpty()) {
-            throw Youtube.NotAvailable("Toto video sa nedá stiahnuť ako video.")
+        if (wholePlaylist && playlist != null) {
+            val height = if (wantVideo) {
+                Downloads.say("Zisťujem dostupné kvality...")
+                qualityFromFirstPlayable(playlist) ?: return null
+            } else 0
+            return Job(
+                videoIds = playlist.items.map { it.videoId },
+                titles = playlist.items.map { it.title },
+                album = playlist.title,
+                height = height,
+            )
         }
-        return askQuality(media)
+
+        val id = singleId ?: throw Youtube.NotAvailable("V odkaze som nenašiel ID videa.")
+        if (!wantVideo) return Job(listOf(id), emptyList(), album = null, height = 0)
+
+        val media = withContext(Dispatchers.IO) { Youtube.resolve(id) }
+        if (media.videos.isEmpty()) throw Youtube.NotAvailable("Toto video sa nedá stiahnuť ako video.")
+        val chosen = askQuality(media) ?: return null
+        return Job(listOf(id), listOf(media.title), album = null, height = chosen.height)
     }
 
-    private suspend fun askWholePlaylist(playlist: Playlist): Boolean =
+    /**
+     * Quality is asked once per playlist, using the first track that resolves.
+     * The service then takes the nearest height for every other track.
+     */
+    private suspend fun qualityFromFirstPlayable(playlist: Playlist): Int? {
+        for (item in playlist.items.take(3)) {
+            val media = runCatching { withContext(Dispatchers.IO) { Youtube.resolve(item.videoId) } }
+                .getOrNull() ?: continue
+            if (media.videos.isEmpty()) continue
+            return askQuality(media)?.height
+        }
+        return 1080  // nothing to show; aim high, nearest available wins per track
+    }
+
+    private fun launchDownload(job: Job) {
+        val intent = job.into(Intent(this, DownloadService::class.java))
+        ContextCompat.startForegroundService(this, intent)
+    }
+
+    private fun requestNotificationsOnce() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        val granted = ContextCompat.checkSelfPermission(
+            this, Manifest.permission.POST_NOTIFICATIONS,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!granted) askNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
+    }
+
+    /** true = all, false = just this video, null = backed out. */
+    private suspend fun askWholePlaylist(playlist: Playlist): Boolean? =
         suspendCancellableCoroutine { cont ->
             val dialog = AlertDialog.Builder(this)
                 .setTitle(playlist.title)
                 .setMessage("Playlist má ${playlist.items.size} videí.")
                 .setPositiveButton("Stiahnuť všetky") { _, _ -> cont.resume(true) }
                 .setNegativeButton("Len toto jedno") { _, _ -> cont.resume(false) }
-                .setOnCancelListener { cont.resume(false) }
+                .setOnCancelListener { cont.resume(null) }
                 .create()
             cont.invokeOnCancellation { dialog.dismiss() }
             dialog.show()
@@ -190,65 +220,13 @@ class MainActivity : AppCompatActivity() {
         dialog.show()
     }
 
-    private fun fetch(
-        media: Media,
-        video: Stream?,
-        album: String? = null,
-        track: Int? = null,
-    ): String {
-        val work = File(cacheDir, "work").apply { mkdirs() }
-        val audioFile = File(work, "audio.m4a")
-        val videoFile = File(work, "video.mp4")
-        val muxed = File(work, "muxed.mp4")
-        val temps = listOf(audioFile, videoFile, muxed)
-        temps.forEach { it.delete() }
-
-        try {
-            // Progress is weighted by byte count across both streams, so the bar
-            // reflects actual work rather than jumping between two phases.
-            val totalBytes = media.audio.bytes + (video?.bytes ?: 0)
-            var done = 0L
-            val single = track == null
-
-            Downloader.fetch(media.audio, audioFile) { got, _ ->
-                if (single) publish(done + got, totalBytes)
-            }
-            done += media.audio.bytes
-
-            val result: File
-            if (video != null) {
-                Downloader.fetch(video, videoFile) { got, _ ->
-                    if (single) publish(done + got, totalBytes)
-                }
-                Muxer.combine(videoFile, audioFile, muxed)
-                result = muxed
-            } else {
-                // Already a valid M4A as downloaded - nothing to combine.
-                result = audioFile
-            }
-
-            return Library.publish(this, result, media, video != null, album, track)
-        } finally {
-            temps.forEach { it.delete() }
-        }
-    }
-
     private fun showFailures() {
-        val text = lastFailures.joinToString("\n\n") { (title, reason) -> "• $title\n   $reason" }
+        val text = Downloads.state.value.failures
+            .joinToString("\n\n") { (title, reason) -> "• $title\n   $reason" }
         AlertDialog.Builder(this)
             .setTitle("Nepodarilo sa stiahnuť")
             .setMessage(text)
             .setPositiveButton("Zavrieť", null)
             .show()
-    }
-
-    private fun publish(done: Long, total: Long) {
-        if (total <= 0) return
-        val percent = ((done * 100) / total).toInt().coerceIn(0, 100)
-        runOnUiThread { progress.progress = percent }
-    }
-
-    private fun report(text: String) {
-        runOnUiThread { status.text = text }
     }
 }

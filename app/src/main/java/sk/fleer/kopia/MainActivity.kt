@@ -178,8 +178,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun launchDownload(job: Job) {
-        val intent = job.into(Intent(this, DownloadService::class.java))
-        ContextCompat.startForegroundService(this, intent)
+        Downloads.hand(job)
+        ContextCompat.startForegroundService(this, Intent(this, DownloadService::class.java))
     }
 
     private fun requestNotificationsOnce() {
@@ -195,7 +195,14 @@ class MainActivity : AppCompatActivity() {
         suspendCancellableCoroutine { cont ->
             val dialog = AlertDialog.Builder(this)
                 .setTitle(playlist.title)
-                .setMessage("Playlist má ${playlist.items.size} videí.")
+                .setMessage(
+                    if (playlist.incomplete) {
+                        "Načítal som ${playlist.items.size} videí, playlist má ale viac. " +
+                            "Stiahne sa len týchto ${playlist.items.size}."
+                    } else {
+                        "Playlist má ${playlist.items.size} videí."
+                    }
+                )
                 .setPositiveButton("Stiahnuť všetky") { _, _ -> cont.resume(true) }
                 .setNegativeButton("Len toto jedno") { _, _ -> cont.resume(false) }
                 .setOnCancelListener { cont.resume(null) }

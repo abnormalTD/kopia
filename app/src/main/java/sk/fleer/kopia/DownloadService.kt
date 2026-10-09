@@ -29,6 +29,7 @@ class DownloadService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private lateinit var notifications: NotificationManager
     private var lastNotifiedPercent = -1
+    private var active: kotlinx.coroutines.Job? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -47,15 +48,18 @@ class DownloadService : Service() {
             this, ONGOING_ID, progressNotification("Pripravujem...", 0),
             ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
         )
-        val job = intent?.let { Job.from(it) }
-        if (job == null || Downloads.state.value.running) {
-            if (!Downloads.state.value.running) stopSelf(startId)
+        // The screen already marks the shared state as running when it hands over
+        // a job, so "busy" has to be judged by this service's own work.
+        if (active?.isActive == true) return START_NOT_STICKY
+        val job = Downloads.take()
+        if (job == null) {
+            Downloads.say("")
+            stopSelf(startId)
             return START_NOT_STICKY
         }
 
-        Downloads.set(Downloads.State(running = true, line = "Pripravujem..."))
         lastNotifiedPercent = -1
-        scope.launch {
+        active = scope.launch {
             try {
                 run(job)
             } catch (e: Exception) {

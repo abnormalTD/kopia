@@ -28,6 +28,13 @@ object Youtube {
 
     private const val PLAYER_URL = "https://www.youtube.com/youtubei/v1/player"
     private const val WATCH_URL = "https://www.youtube.com/watch?v="
+    private const val BROWSE_URL = "https://www.youtube.com/youtubei/v1/browse"
+
+    /**
+     * Beyond this, loading the list alone takes a long while and nobody means to
+     * queue thousands of songs. The cap is never silent: the dialog says so.
+     */
+    private const val PLAYLIST_LIMIT = 1000
 
     private const val DESKTOP_UA =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
@@ -97,23 +104,104 @@ object Youtube {
         val html = get("https://www.youtube.com/playlist?list=$id", DESKTOP_UA)
         val data = embeddedJson(html, "ytInitialData")
             ?: throw NotAvailable("Playlist sa nepodarilo načítať.")
+        val webVersion = Regex(""""INNERTUBE_CLIENT_VERSION":"([^"]+)"""")
+            .find(html)?.groupValues?.get(1)
 
-        val entries = mutableListOf<JSONObject>()
-        collect(data, "lockupViewModel", entries)
-
-        val items = entries.mapNotNull { entry ->
-            if (entry.optString("contentType") != "LOCKUP_CONTENT_TYPE_VIDEO") return@mapNotNull null
-            val videoId = entry.optString("contentId").ifBlank { null } ?: return@mapNotNull null
-            val titles = mutableListOf<String>()
-            collectStrings(entry.optJSONObject("metadata"), "content", titles)
-            PlaylistItem(videoId, titles.firstOrNull()?.ifBlank { null } ?: videoId)
-        }.distinctBy { it.videoId }
+        // The page carries only the first ~97 entries. The rest come ~100 at a
+        // time from the browse endpoint, each batch ending in a token for the
+        // next. Measured: 30 batches walked cleanly to ~3000 videos.
+        val items = LinkedHashMap<String, PlaylistItem>()
+        addItems(data, items)
+        var token = continuationToken(data)
+        var incomplete = false
+        while (token != null) {
+            if (items.size >= PLAYLIST_LIMIT || webVersion == null) {
+                incomplete = true
+                break
+            }
+            val batch = try {
+                browse(token, webVersion)
+            } catch (e: Exception) {
+                incomplete = true  // keep what we have, but say it is partial
+                break
+            }
+            val before = items.size
+            addItems(batch, items)
+            token = continuationToken(batch)
+            if (items.size == before) break  // no progress - never loop forever
+        }
 
         if (items.isEmpty()) throw NotAvailable("V playliste som nenašiel žiadne videá.")
 
         val titles = mutableListOf<String>()
         collectStrings(data.optJSONObject("microformat"), "title", titles)
-        return Playlist(titles.firstOrNull()?.ifBlank { null } ?: "Playlist", items)
+        return Playlist(
+            title = titles.firstOrNull()?.ifBlank { null } ?: "Playlist",
+            items = items.values.take(PLAYLIST_LIMIT),
+            incomplete = incomplete,
+        )
+    }
+
+    private fun addItems(node: JSONObject, into: MutableMap<String, PlaylistItem>) {
+        val entries = mutableListOf<JSONObject>()
+        collect(node, "lockupViewModel", entries)
+        for (entry in entries) {
+            if (entry.optString("contentType") != "LOCKUP_CONTENT_TYPE_VIDEO") continue
+            val videoId = entry.optString("contentId").ifBlank { null } ?: continue
+            val titles = mutableListOf<String>()
+            collectStrings(entry.optJSONObject("metadata"), "content", titles)
+            into.putIfAbsent(videoId, PlaylistItem(videoId, titles.firstOrNull()?.ifBlank { null } ?: videoId))
+        }
+    }
+
+    /**
+     * The token sits in a continuationCommand nested *inside* another
+     * continuationCommand, so a search that stops at the first matching key -
+     * like [collect] - walks right past it. The last one found is the one that
+     * follows the list.
+     */
+    private fun continuationToken(node: Any?): String? {
+        var found: String? = null
+        fun scan(n: Any?) {
+            when (n) {
+                is JSONObject -> {
+                    n.optJSONObject("continuationCommand")?.optString("token")
+                        ?.ifBlank { null }?.let { found = it }
+                    for (name in n.keys()) scan(n.get(name))
+                }
+                is JSONArray -> for (i in 0 until n.length()) scan(n.get(i))
+            }
+        }
+        scan(node)
+        return found
+    }
+
+    /** Playlist metadata only - the web client is fine here; it is just the streams it cannot give. */
+    private fun browse(token: String, webVersion: String): JSONObject {
+        val body = JSONObject()
+            .put("context", JSONObject().put("client", JSONObject()
+                .put("clientName", "WEB")
+                .put("clientVersion", webVersion)
+                .put("hl", "en")
+                .put("gl", "US")))
+            .put("continuation", token)
+            .toString()
+        val conn = (URL(BROWSE_URL).openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            doOutput = true
+            connectTimeout = 20_000
+            readTimeout = 30_000
+            setRequestProperty("Content-Type", "application/json")
+            setRequestProperty("User-Agent", DESKTOP_UA)
+            setRequestProperty("X-YouTube-Client-Name", "1")
+            setRequestProperty("X-YouTube-Client-Version", webVersion)
+        }
+        try {
+            conn.outputStream.use { it.write(body.toByteArray()) }
+            return JSONObject(conn.inputStream.bufferedReader().use { it.readText() })
+        } finally {
+            conn.disconnect()
+        }
     }
 
     private fun embeddedJson(html: String, marker: String): JSONObject? {
@@ -332,4 +420,9 @@ data class Media(
 
 data class PlaylistItem(val videoId: String, val title: String)
 
-data class Playlist(val title: String, val items: List<PlaylistItem>)
+data class Playlist(
+    val title: String,
+    val items: List<PlaylistItem>,
+    /** True when the list was cut short - by the limit or by a failed batch. */
+    val incomplete: Boolean = false,
+)

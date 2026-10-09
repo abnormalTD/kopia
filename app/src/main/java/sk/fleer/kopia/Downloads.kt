@@ -1,9 +1,7 @@
 package sk.fleer.kopia
 
-import android.content.Intent
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.update
 
 /**
  * The single source of truth for what is being downloaded.
@@ -26,8 +24,29 @@ object Downloads {
     private val mutable = MutableStateFlow(State())
     val state: StateFlow<State> = mutable
 
+    /**
+     * The job travels to the service in memory, not inside the Intent. Both run
+     * in this one process, and an Intent has a hard size limit: a long playlist's
+     * IDs and titles would end in TransactionTooLargeException.
+     */
+    @Volatile
+    private var pending: Job? = null
+
     /** A message from the screen while it is still working out what to download. */
-    fun say(line: String) = mutable.update { State(line = line) }
+    fun say(line: String) {
+        mutable.value = State(line = line)
+    }
+
+    /**
+     * Marks the download as running right away, so the button cannot start a
+     * second one in the moment before the service picks this one up.
+     */
+    fun hand(job: Job) {
+        pending = job
+        mutable.value = State(running = true, line = "Pripravujem...")
+    }
+
+    internal fun take(): Job? = pending.also { pending = null }
 
     internal fun set(state: State) {
         mutable.value = state
@@ -47,24 +66,4 @@ data class Job(
     val height: Int,
 ) {
     val isVideo get() = height > 0
-
-    fun into(intent: Intent): Intent = intent
-        .putStringArrayListExtra(IDS, ArrayList(videoIds))
-        .putStringArrayListExtra(TITLES, ArrayList(titles))
-        .putExtra(ALBUM, album)
-        .putExtra(HEIGHT, height)
-
-    companion object {
-        private const val IDS = "ids"
-        private const val TITLES = "titles"
-        private const val ALBUM = "album"
-        private const val HEIGHT = "height"
-
-        fun from(intent: Intent): Job? {
-            val ids = intent.getStringArrayListExtra(IDS) ?: return null
-            if (ids.isEmpty()) return null
-            val titles = intent.getStringArrayListExtra(TITLES) ?: arrayListOf()
-            return Job(ids, titles, intent.getStringExtra(ALBUM), intent.getIntExtra(HEIGHT, 0))
-        }
-    }
 }

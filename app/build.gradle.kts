@@ -11,8 +11,8 @@ android {
         applicationId = "sk.fleer.kopia"
         minSdk = 29
         targetSdk = 35
-        versionCode = 10
-        versionName = "0.10"
+        versionCode = 11
+        versionName = "0.11"
     }
 
     buildTypes {
@@ -33,6 +33,9 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+    testOptions {
+        unitTests.all { it.testLogging { events("passed", "failed", "skipped", "standardOut") } }
+    }
 }
 
 dependencies {
@@ -44,4 +47,9 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.4")
+
+    testImplementation("junit:junit:4.13.2")
+    // android.jar's org.json is a stub that throws on the JVM; the real library
+    // lets the extraction code run unchanged in desktop tests.
+    testImplementation("org.json:json:20240303")
 }

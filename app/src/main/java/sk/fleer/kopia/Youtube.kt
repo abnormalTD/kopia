@@ -64,6 +64,11 @@ object Youtube {
     @Volatile
     private var visitor: String? = null
 
+    /** Make the next request fetch a new visitor identity. */
+    fun forgetIdentity() {
+        visitor = null
+    }
+
     class NotAvailable(message: String) : IOException(message)
 
     fun videoId(input: String): String {

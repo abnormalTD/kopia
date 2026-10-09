@@ -87,14 +87,7 @@ class DownloadService : Service() {
             update(prefix + (known ?: "..."), index, count, 0.0)
 
             try {
-                val media = Youtube.resolve(id)
-                update(prefix + media.title, index, count, 0.0)
-                val video = if (job.isVideo) pickVideo(media, job.height) else null
-                lastSaved = fetch(
-                    media, video,
-                    album = job.album,
-                    track = if (count > 1) number else null,
-                ) { fraction -> update(prefix + media.title, index, count, fraction) }
+                lastSaved = downloadTrack(id, job, prefix, index, count)
             } catch (e: Exception) {
                 // One unavailable track should not abandon the others - but keep
                 // the reason, or nobody can tell a refusal from a dropped line.
@@ -115,6 +108,35 @@ class DownloadService : Service() {
             if (failures.isEmpty()) "Hotovo" else "Hotovo, $done z $count",
             if (count == 1) failures.firstOrNull()?.second ?: lastSaved else folder,
         ))
+    }
+
+    /**
+     * Some visitor identities get URLs that serve the first megabyte or so and
+     * then answer 403 - measured on desktop at roughly one identity in nine. The
+     * refusal belongs to the identity, not the video or the URL: under a bad one,
+     * fresh URLs for the same video and URLs for other videos all failed, while
+     * the same video worked under new identities. Since the identity is kept for
+     * the whole run, one unlucky draw used to fail every track of a playlist.
+     * So on a refusal: drop the identity, resolve again, restart the track.
+     */
+    private fun downloadTrack(id: String, job: Job, prefix: String, index: Int, count: Int): String {
+        var swaps = 0
+        while (true) {
+            val media = Youtube.resolve(id)
+            update(prefix + media.title, index, count, 0.0)
+            val video = if (job.isVideo) pickVideo(media, job.height) else null
+            try {
+                return fetch(
+                    media, video,
+                    album = job.album,
+                    track = if (count > 1) index + 1 else null,
+                ) { fraction -> update(prefix + media.title, index, count, fraction) }
+            } catch (e: Downloader.Refused) {
+                if (++swaps > IDENTITY_SWAPS) throw e
+                Youtube.forgetIdentity()
+                update(prefix + media.title + " (nový pokus)", index, count, 0.0)
+            }
+        }
     }
 
     /** The exact height if this video has it, otherwise the nearest one. */
@@ -197,5 +219,8 @@ class DownloadService : Service() {
         private const val CHANNEL = "downloads"
         private const val ONGOING_ID = 1
         private const val DONE_ID = 2
+
+        /** At ~1 bad identity in 9, three fresh draws all failing is ~1 in 700. */
+        private const val IDENTITY_SWAPS = 3
     }
 }

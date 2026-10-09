@@ -28,7 +28,13 @@ Súbory nájdeš v `Music/Kopia` a `Movies/Kopia` a hudobné prehrávače ich vi
 - Playlist najviac **1000 skladieb** (ak je dlhší, appka to povie).
 - Hudba je vo formáte **M4A (AAC)**, nie MP3. Je to formát, v ktorom ju posiela YouTube — prevod do MP3 by kvalitu len zhoršil.
 
-Appka je určená na osobné použitie.
+## Upozornenie
+
+Kópia je osobný hobby projekt, určený **len na súkromné, osobné použitie**.
+
+Sťahovanie obsahu z YouTube môže byť v rozpore s podmienkami používania YouTube a autorské právo sa v rôznych krajinách líši. Za to, že tvoje používanie je v súlade s podmienkami YouTube a s autorským právom, ktoré sa na teba vzťahuje, zodpovedáš ty. Sťahuj len obsah, na ktorý máš právo — napríklad vlastné videá, voľné diela alebo obsah, ktorý smieš uložiť.
+
+Projekt nie je nijako spojený s YouTube ani so spoločnosťou Google, ani ním nie je podporovaný.
 
 ## Ako to funguje
 

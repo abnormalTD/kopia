@@ -19,6 +19,7 @@ object Downloads {
         val line: String = "",
         val percent: Int = 0,
         val failures: List<Pair<String, String>> = emptyList(),
+        val cancelling: Boolean = false,
     )
 
     private val mutable = MutableStateFlow(State())

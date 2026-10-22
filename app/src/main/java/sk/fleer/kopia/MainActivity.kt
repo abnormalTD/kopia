@@ -60,10 +60,10 @@ class MainActivity : AppCompatActivity() {
         progress = findViewById(R.id.progress)
         status = findViewById(R.id.status)
 
-        videoSwitch.setOnCheckedChangeListener { _, video ->
-            button.text = if (video) "STIAHNUŤ VIDEO" else "STIAHNUŤ HUDBU"
+        videoSwitch.setOnCheckedChangeListener { _, _ -> render(Downloads.state.value) }
+        button.setOnClickListener {
+            if (Downloads.state.value.running) DownloadService.cancel(this) else start()
         }
-        button.setOnClickListener { start() }
         status.setOnClickListener {
             if (Downloads.state.value.failures.isNotEmpty()) showFailures()
         }
@@ -125,7 +125,13 @@ class MainActivity : AppCompatActivity() {
         status.text = state.line
         progress.visibility = if (state.running) View.VISIBLE else View.INVISIBLE
         progress.progress = state.percent
-        button.isEnabled = !state.running && !asking
+        // While a download runs, the (otherwise idle) download button is Cancel.
+        button.text = when {
+            state.running -> "ZRUŠIŤ"
+            videoSwitch.isChecked -> "STIAHNUŤ VIDEO"
+            else -> "STIAHNUŤ HUDBU"
+        }
+        button.isEnabled = if (state.running) !state.cancelling else !asking
     }
 
     /** Fills the field when a link arrives from another app's share sheet. */

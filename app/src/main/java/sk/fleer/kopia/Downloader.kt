@@ -17,7 +17,15 @@ object Downloader {
     private const val CHUNK = 1L shl 20
     private const val ATTEMPTS = 4
 
-    fun fetch(stream: Stream, dest: File, onProgress: (Long, Long) -> Unit) {
+    /** The user cancelled; not a failure, so it is kept apart from IOException. */
+    class Cancelled : Exception("Zrušené.")
+
+    fun fetch(
+        stream: Stream,
+        dest: File,
+        isCancelled: () -> Boolean = { false },
+        onProgress: (Long, Long) -> Unit,
+    ) {
         val from = if (dest.isFile) dest.length() else 0L
         if (from >= stream.bytes) return
 
@@ -25,6 +33,7 @@ object Downloader {
         java.io.FileOutputStream(dest, from > 0).use { out ->
             var at = from
             while (at < stream.bytes) {
+                if (isCancelled()) throw Cancelled()
                 val last = minOf(at + CHUNK, stream.bytes) - 1
                 out.write(chunk(stream, at, last))
                 at = last + 1

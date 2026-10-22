@@ -31,6 +31,9 @@ class DownloadService : Service() {
     private var lastNotifiedPercent = -1
     private var active: kotlinx.coroutines.Job? = null
 
+    @Volatile
+    private var cancelled = false
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -42,6 +45,17 @@ class DownloadService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Cancel arrives via startService (button or notification action), so it
+        // needs no startForeground - and must not reset the progress notification.
+        if (intent?.action == ACTION_CANCEL) {
+            if (active?.isActive == true) {
+                cancelled = true
+                Downloads.set(Downloads.state.value.copy(line = "Ruším...", cancelling = true))
+            } else {
+                stopSelf(startId)
+            }
+            return START_NOT_STICKY
+        }
         // startForeground must follow every startForegroundService, even one we
         // are about to ignore, or Android kills the app.
         ServiceCompat.startForeground(
@@ -59,6 +73,7 @@ class DownloadService : Service() {
         }
 
         lastNotifiedPercent = -1
+        cancelled = false
         active = scope.launch {
             try {
                 run(job)
@@ -87,6 +102,7 @@ class DownloadService : Service() {
         var lastOutcome: Outcome? = null
 
         for ((index, id) in job.videoIds.withIndex()) {
+            if (cancelled) break
             val number = index + 1
             val known = job.titles.getOrNull(index)?.ifBlank { null }
             val prefix = if (count > 1) "$number/$count: " else "Sťahujem: "
@@ -96,6 +112,8 @@ class DownloadService : Service() {
                 val outcome = downloadTrack(id, job, prefix, index, count)
                 if (outcome is Outcome.Saved) saved++ else already++
                 lastOutcome = outcome
+            } catch (e: Downloader.Cancelled) {
+                break
             } catch (e: Exception) {
                 // One unavailable track should not abandon the others - but keep
                 // the reason, or nobody can tell a refusal from a dropped line.
@@ -105,6 +123,14 @@ class DownloadService : Service() {
 
         val folder = if (job.isVideo) "Movies/Kopia" else "Music/Kopia"
         val (line, title, text) = when {
+            cancelled -> Triple(
+                buildString {
+                    append("Zrušené.")
+                    if (count > 1) append(" Nových: $saved" + if (already > 0) ", už si mal: $already" else "")
+                },
+                "Zrušené",
+                if (count > 1) "Nových: $saved" else "",
+            )
             count == 1 && lastOutcome is Outcome.Saved ->
                 Triple("Hotovo!\n${lastOutcome.path}", "Hotovo", lastOutcome.path)
             count == 1 && lastOutcome is Outcome.Already ->
@@ -190,10 +216,10 @@ class DownloadService : Service() {
 
         try {
             val total = (media.audio.bytes + (video?.bytes ?: 0)).toDouble()
-            Downloader.fetch(media.audio, audioFile) { got, _ -> onProgress(got / total) }
+            Downloader.fetch(media.audio, audioFile, { cancelled }) { got, _ -> onProgress(got / total) }
 
             val result = if (video != null) {
-                Downloader.fetch(video, videoFile) { got, _ ->
+                Downloader.fetch(video, videoFile, { cancelled }) { got, _ ->
                     onProgress((media.audio.bytes + got) / total)
                 }
                 Muxer.combine(videoFile, audioFile, muxed)
@@ -211,7 +237,14 @@ class DownloadService : Service() {
     /** Overall progress counts finished tracks plus the fraction of the current one. */
     private fun update(line: String, index: Int, count: Int, fraction: Double) {
         val percent = (((index + fraction.coerceIn(0.0, 1.0)) / count) * 100).toInt()
-        Downloads.set(Downloads.State(running = true, line = line, percent = percent))
+        Downloads.set(
+            Downloads.State(
+                running = true,
+                line = if (cancelled) "Ruším..." else line,
+                percent = percent,
+                cancelling = cancelled,
+            )
+        )
         // The system throttles notification updates; only post real changes.
         if (percent != lastNotifiedPercent) {
             lastNotifiedPercent = percent
@@ -230,6 +263,13 @@ class DownloadService : Service() {
             .setContentTitle("Kópia sťahuje")
             .setContentText(text)
             .setProgress(100, percent, false)
+            .addAction(
+                android.R.drawable.ic_menu_close_clear_cancel, "Zrušiť",
+                PendingIntent.getService(
+                    this, 1, Intent(this, DownloadService::class.java).setAction(ACTION_CANCEL),
+                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+                ),
+            )
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setContentIntent(openApp())
@@ -245,6 +285,12 @@ class DownloadService : Service() {
             .build()
 
     companion object {
+        private const val ACTION_CANCEL = "sk.fleer.kopia.CANCEL"
+
+        fun cancel(context: android.content.Context) {
+            context.startService(Intent(context, DownloadService::class.java).setAction(ACTION_CANCEL))
+        }
+
         private const val CHANNEL = "downloads"
         private const val ONGOING_ID = 1
         private const val DONE_ID = 2

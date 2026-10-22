@@ -31,7 +31,9 @@ class YoutubeLiveTest {
     fun shortPlaylistIsReadWhole() {
         val p = Youtube.playlist("PLD-ZRtrm9GCE3eRfxgn2EBerng7Htln0B")
         println("short playlist: '${p.title}', ${p.items.size} items, incomplete=${p.incomplete}")
-        assertEquals(24, p.items.size)
+        // The user's own playlist: its length changes whenever they add a song,
+        // so check what matters - it fits in the first page and is read whole.
+        assertTrue(p.items.size in 1..96)
         assertFalse(p.incomplete)
     }
 

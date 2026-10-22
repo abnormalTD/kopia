@@ -2,20 +2,31 @@ package sk.fleer.kopia
 
 import java.io.File
 import java.io.IOException
+import java.io.RandomAccessFile
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.concurrent.thread
 
 /**
- * Chunked Range downloads.
+ * Chunked Range downloads, several at once.
  *
  * Not one long GET: measured on a desktop, a single continuous connection to
  * googlevideo gets throttled and stalls - it died at 95% of a 2.7MB file. Asking
- * for a megabyte at a time avoids that, and makes resuming free.
+ * for a megabyte at a time avoids that.
+ *
+ * Four requests in flight: measured with this code on the user's network
+ * (32 MiB of a 1080p60 stream, two rounds), 1 -> 2.1 MB/s, 2 -> 3.0, 4 -> 3.5,
+ * 8 -> 3.7 MB/s. Four gets nearly all of it without leaning on YouTube harder
+ * than needed. Chunks finish out of order, so each is written at its own offset.
  */
 object Downloader {
 
     private const val CHUNK = 1L shl 20
     private const val ATTEMPTS = 4
+    private const val PARALLEL = 4
 
     /** The user cancelled; not a failure, so it is kept apart from IOException. */
     class Cancelled : Exception("Zrušené.")
@@ -26,22 +37,44 @@ object Downloader {
         isCancelled: () -> Boolean = { false },
         onProgress: (Long, Long) -> Unit,
     ) {
-        val from = if (dest.isFile) dest.length() else 0L
-        if (from >= stream.bytes) return
-
         dest.parentFile?.mkdirs()
-        java.io.FileOutputStream(dest, from > 0).use { out ->
-            var at = from
-            while (at < stream.bytes) {
-                if (isCancelled()) throw Cancelled()
-                val last = minOf(at + CHUNK, stream.bytes) - 1
-                out.write(chunk(stream, at, last))
-                at = last + 1
-                onProgress(at, stream.bytes)
+        dest.delete()
+        RandomAccessFile(dest, "rw").use { it.setLength(stream.bytes) }
+
+        val ranges = (0 until stream.bytes step CHUNK).map { it to minOf(it + CHUNK, stream.bytes) - 1 }
+        val next = AtomicInteger(0)
+        val received = AtomicLong(0)
+        val failure = AtomicReference<Throwable?>(null)
+
+        val workers = List(minOf(PARALLEL, ranges.size)) {
+            thread(name = "kopia-download-$it") {
+                // One file handle per worker: writes go to disjoint regions.
+                RandomAccessFile(dest, "rw").use { out ->
+                    while (failure.get() == null) {
+                        val i = next.getAndIncrement()
+                        if (i >= ranges.size) break
+                        if (isCancelled()) {
+                            failure.compareAndSet(null, Cancelled())
+                            break
+                        }
+                        val (from, to) = ranges[i]
+                        val data = try {
+                            chunk(stream, from, to)
+                        } catch (t: Throwable) {
+                            failure.compareAndSet(null, t)  // the first error wins; the rest stop
+                            break
+                        }
+                        out.seek(from)
+                        out.write(data)
+                        onProgress(received.addAndGet(data.size.toLong()), stream.bytes)
+                    }
+                }
             }
         }
-        if (dest.length() != stream.bytes) {
-            throw IOException("Stiahnuté ${dest.length()} z ${stream.bytes} bajtov.")
+        workers.forEach { it.join() }
+        failure.get()?.let { throw it }
+        if (received.get() != stream.bytes) {
+            throw IOException("Stiahnuté ${received.get()} z ${stream.bytes} bajtov.")
         }
     }
 

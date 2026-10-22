@@ -16,12 +16,12 @@ Potrebuješ Android 10 alebo novší.
 
 - **Zdieľaj** video alebo playlist priamo z YouTube appky → vyber Kópiu. Alebo odkaz vlož ručne.
 - Prepínač **Stiahnuť celé video** — vypnutý = hudba, zapnutý = video (vyberieš kvalitu, pri každej vidíš veľkosť súboru).
-- **Playlisty** sa stiahnu celé, skladby sa očíslujú a v hudobnom prehrávači sa zoskupia ako album.
+- **Playlisty** sa stiahnu celé do vlastného priečinka, skladby sa očíslujú a v hudobnom prehrávači sa zoskupia ako album.
 - Keď playlist stiahneš znova, Kópia **dotiahne len nové pesničky** — nič nesťahuje dvakrát.
 - Rozbehnuté sťahovanie sa dá **zrušiť** v appke aj v notifikácii.
 - Sťahovanie beží na pozadí s notifikáciou — môžeš appku zavrieť, otočiť telefón alebo ho zamknúť.
 
-Súbory nájdeš v `Music/Kopia` a `Movies/Kopia` a hudobné prehrávače ich vidia hneď.
+Súbory nájdeš v `Music/Kopia` a `Movies/Kopia` (playlisty v podpriečinku s ich názvom, napr. `Music/Kopia/Spain`) a hudobné prehrávače ich vidia hneď.
 
 ## Čo appka nevie
 
@@ -43,7 +43,7 @@ Projekt nie je nijako spojený s YouTube ani so spoločnosťou Google, ani ním 
 Bez Pythonu, bez ffmpegu, bez vlastného JavaScript enginu:
 
 - Adresy streamov získava jedným HTTP dotazom na YouTube API v úlohe klienta, ktorý ich ešte dostáva priamo (webový prehrávač už používa protokol SABR a priame adresy nedáva).
-- Sťahuje po 1 MB kúskoch — jedno dlhé spojenie YouTube spomalí a zasekne.
+- Sťahuje po 1 MB kúskoch, štyri naraz — jedno dlhé spojenie YouTube spomalí a zasekne, a súbežné kúsky sú zhruba dvakrát rýchlejšie.
 - Video a zvuk spája systémový `MediaMuxer` bez prekódovania; ukladá cez `MediaStore`, takže netreba žiadne povolenie k úložisku.
 
 ## Vývoj

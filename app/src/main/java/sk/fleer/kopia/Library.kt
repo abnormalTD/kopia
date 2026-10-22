@@ -71,7 +71,7 @@ object Library {
         // managers and players that ignore the TRACK column.
         val prefix = track?.let { "%02d - ".format(it) }.orEmpty()
         val name = filename(prefix + media.title, if (isVideo) "mp4" else "m4a")
-        val folder = if (isVideo) "Movies/Kopia" else "Music/Kopia"
+        val folder = folderFor(isVideo, album)
         val collection = if (isVideo) {
             MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
         } else {
@@ -89,20 +89,25 @@ object Library {
         }
 
         val resolver = context.contentResolver
-        // A playlist track may already be here without its number: downloaded
-        // earlier as a single song (seen on the user's phone - same file, saved
-        // twice under the two names).
+        // Where an earlier copy may already be: the plain name covers a song
+        // downloaded on its own (seen on the user's phone - the same file saved
+        // twice under the two names), and the base folder covers singles and
+        // playlists synced before they got their own folder. The base folder is
+        // probed first: probing inside the playlist folder creates it, and it
+        // should not be left behind empty when the song turns up elsewhere.
         val plain = filename(media.title, if (isVideo) "mp4" else "m4a")
-        for (candidate in listOf(name, plain).distinct()) {
+        val base = folderFor(isVideo, null)
+        val places = listOf(base to name, base to plain, folder to name, folder to plain).distinct()
+        for ((where, candidate) in places) {
             val probe = resolver.insert(collection, ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, candidate)
                 put(MediaStore.MediaColumns.MIME_TYPE, if (isVideo) "video/mp4" else "audio/mp4")
-                put(MediaStore.MediaColumns.RELATIVE_PATH, folder)
+                put(MediaStore.MediaColumns.RELATIVE_PATH, where)
                 put(MediaStore.MediaColumns.IS_PENDING, 0)
             }) ?: throw IOException("Nepodarilo sa vytvoriť súbor v úložisku.")
             val given = displayName(context, probe)
             resolver.delete(probe, null, null)
-            if (given != candidate) return Claim.Taken("$folder/$candidate")
+            if (given != candidate) return Claim.Taken("$where/$candidate")
         }
 
         val uri = resolver.insert(collection, values)
@@ -129,6 +134,18 @@ object Library {
 
     fun abandon(context: Context, slot: Slot) {
         runCatching { context.contentResolver.delete(slot.uri, null, null) }
+    }
+
+    /** A playlist gets its own folder: Music/Kopia/<playlist>, singles stay in Music/Kopia. */
+    fun folderFor(isVideo: Boolean, playlist: String?): String {
+        val base = if (isVideo) "Movies/Kopia" else "Music/Kopia"
+        val sub = playlist
+            ?.replace(Regex("""[/\\:*?"<>|]"""), " ")  // "Rock/Pop" -> "Rock Pop", not "RockPop"
+            ?.replace(Regex("""\s+"""), " ")
+            ?.trim(' ', '.')  // no hidden folders, no "." or ".." path tricks
+            ?.take(100)
+            ?.ifBlank { null }
+        return if (sub == null) base else "$base/$sub"
     }
 
     private fun records(context: Context) =

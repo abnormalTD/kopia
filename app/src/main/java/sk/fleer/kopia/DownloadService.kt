@@ -121,7 +121,7 @@ class DownloadService : Service() {
             }
         }
 
-        val folder = if (job.isVideo) "Movies/Kopia" else "Music/Kopia"
+        val folder = Library.folderFor(job.isVideo, job.album)
         val (line, title, text) = when {
             cancelled -> Triple(
                 buildString {

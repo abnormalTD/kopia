@@ -82,7 +82,9 @@ class DownloadService : Service() {
     private fun run(job: Job) {
         val count = job.videoIds.size
         val failures = mutableListOf<Pair<String, String>>()
-        var lastSaved = ""
+        var saved = 0
+        var already = 0
+        var lastOutcome: Outcome? = null
 
         for ((index, id) in job.videoIds.withIndex()) {
             val number = index + 1
@@ -91,7 +93,9 @@ class DownloadService : Service() {
             update(prefix + (known ?: "..."), index, count, 0.0)
 
             try {
-                lastSaved = downloadTrack(id, job, prefix, index, count)
+                val outcome = downloadTrack(id, job, prefix, index, count)
+                if (outcome is Outcome.Saved) saved++ else already++
+                lastOutcome = outcome
             } catch (e: Exception) {
                 // One unavailable track should not abandon the others - but keep
                 // the reason, or nobody can tell a refusal from a dropped line.
@@ -99,47 +103,68 @@ class DownloadService : Service() {
             }
         }
 
-        val done = count - failures.size
         val folder = if (job.isVideo) "Movies/Kopia" else "Music/Kopia"
-        val line = when {
-            count == 1 && failures.isEmpty() -> "Hotovo!\n$lastSaved"
-            count == 1 -> failures.first().second
-            else -> "Hotovo! $done z $count do $folder" +
-                if (failures.isEmpty()) "" else "\n${failures.size} sa nepodarilo - klepni sem pre dôvod."
+        val (line, title, text) = when {
+            count == 1 && lastOutcome is Outcome.Saved ->
+                Triple("Hotovo!\n${lastOutcome.path}", "Hotovo", lastOutcome.path)
+            count == 1 && lastOutcome is Outcome.Already ->
+                Triple("Túto už máš:\n${lastOutcome.path}", "Už ju máš", lastOutcome.path)
+            count == 1 ->
+                Triple(failures.first().second, "Nepodarilo sa", failures.first().second)
+            saved == 0 && failures.isEmpty() ->
+                Triple("Nič nové - všetkých $already už máš.", "Nič nové", folder)
+            else -> Triple(
+                buildString {
+                    append("Hotovo! Nových: $saved")
+                    if (already > 0) append(", už si mal: $already")
+                    append("\n$folder")
+                    if (failures.isNotEmpty()) append("\n${failures.size} sa nepodarilo - klepni sem pre dôvod.")
+                },
+                "Hotovo, nových $saved",
+                folder,
+            )
         }
         Downloads.set(Downloads.State(running = false, line = line, percent = 100, failures = failures))
-        notifications.notify(DONE_ID, doneNotification(
-            if (failures.isEmpty()) "Hotovo" else "Hotovo, $done z $count",
-            if (count == 1) failures.firstOrNull()?.second ?: lastSaved else folder,
-        ))
+        notifications.notify(DONE_ID, doneNotification(title, text))
     }
 
-    /**
-     * Some visitor identities get URLs that serve the first megabyte or so and
-     * then answer 403 - measured on desktop at roughly one identity in nine. The
-     * refusal belongs to the identity, not the video or the URL: under a bad one,
-     * fresh URLs for the same video and URLs for other videos all failed, while
-     * the same video worked under new identities. Since the identity is kept for
-     * the whole run, one unlucky draw used to fail every track of a playlist.
-     * So on a refusal: drop the identity, resolve again, restart the track.
-     */
-    private fun downloadTrack(id: String, job: Job, prefix: String, index: Int, count: Int): String {
-        var swaps = 0
-        while (true) {
-            val media = Youtube.resolve(id)
-            update(prefix + media.title, index, count, 0.0)
-            val video = if (job.isVideo) pickVideo(media, job.height) else null
-            try {
-                return fetch(
-                    media, video,
-                    album = job.album,
-                    track = if (count > 1) index + 1 else null,
-                ) { fraction -> update(prefix + media.title, index, count, fraction) }
-            } catch (e: Downloader.Refused) {
-                if (++swaps > IDENTITY_SWAPS) throw e
-                Youtube.forgetIdentity()
-                update(prefix + media.title + " (nový pokus)", index, count, 0.0)
+    private sealed interface Outcome {
+        val path: String
+        class Saved(override val path: String) : Outcome
+        class Already(override val path: String) : Outcome
+    }
+
+    private fun downloadTrack(id: String, job: Job, prefix: String, index: Int, count: Int): Outcome {
+        val key = Library.key(id, job.height)
+        Library.known(this, key)?.let { return Outcome.Already(it) }
+
+        var media = Youtube.resolve(id)
+        update(prefix + media.title, index, count, 0.0)
+        val track = if (count > 1) index + 1 else null
+        val slot = when (val claim = Library.claim(this, media, job.isVideo, job.album, track)) {
+            is Library.Claim.Taken -> return Outcome.Already(claim.path)
+            is Library.Claim.Free -> claim.slot
+        }
+
+        try {
+            var swaps = 0
+            while (true) {
+                val video = if (job.isVideo) pickVideo(media, job.height) else null
+                try {
+                    val path = fetch(media, video, slot, key) { fraction ->
+                        update(prefix + media.title, index, count, fraction)
+                    }
+                    return Outcome.Saved(path)
+                } catch (e: Downloader.Refused) {
+                    if (++swaps > IDENTITY_SWAPS) throw e
+                    Youtube.forgetIdentity()
+                    update(prefix + media.title + " (nový pokus)", index, count, 0.0)
+                    media = Youtube.resolve(id)
+                }
             }
+        } catch (e: Exception) {
+            Library.abandon(this, slot)  // never leave a half-written entry behind
+            throw e
         }
     }
 
@@ -152,8 +177,8 @@ class DownloadService : Service() {
     private fun fetch(
         media: Media,
         video: Stream?,
-        album: String?,
-        track: Int?,
+        slot: Library.Slot,
+        key: String,
         onProgress: (Double) -> Unit,
     ): String {
         val work = File(cacheDir, "work").apply { mkdirs() }
@@ -177,7 +202,7 @@ class DownloadService : Service() {
                 // Already a valid M4A as downloaded - nothing to combine.
                 audioFile
             }
-            return Library.publish(this, result, media, video != null, album, track)
+            return Library.fill(this, slot, result, key)
         } finally {
             temps.forEach { it.delete() }
         }

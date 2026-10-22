@@ -35,6 +35,7 @@ object Youtube {
      * queue thousands of songs. The cap is never silent: the dialog says so.
      */
     private const val PLAYLIST_LIMIT = 1000
+    private const val PAGE_ATTEMPTS = 3
 
     private const val DESKTOP_UA =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
@@ -101,9 +102,7 @@ object Youtube {
      * returned an empty list.
      */
     fun playlist(id: String): Playlist {
-        val html = get("https://www.youtube.com/playlist?list=$id", DESKTOP_UA)
-        val data = embeddedJson(html, "ytInitialData")
-            ?: throw NotAvailable("Playlist sa nepodarilo načítať.")
+        val (html, data) = playlistPage(id)
         val webVersion = Regex(""""INNERTUBE_CLIENT_VERSION":"([^"]+)"""")
             .find(html)?.groupValues?.get(1)
 
@@ -140,6 +139,24 @@ object Youtube {
             items = items.values.take(PLAYLIST_LIMIT),
             incomplete = incomplete,
         )
+    }
+
+    /**
+     * The playlist page, retried when it comes back without any videos. Seen once
+     * on 2026-10-22 in the live canary ("no videos" for a 3000-video list that
+     * loaded fine before and after; 15 further fetches all had 98 entries), so
+     * it is rare and transient - a fresh request is the cure either way.
+     */
+    private fun playlistPage(id: String): Pair<String, JSONObject> {
+        repeat(PAGE_ATTEMPTS) { attempt ->
+            if (attempt > 0) Thread.sleep(1000L * attempt)
+            val html = get("https://www.youtube.com/playlist?list=$id", DESKTOP_UA)
+            val data = embeddedJson(html, "ytInitialData") ?: return@repeat
+            val probe = mutableListOf<JSONObject>()
+            collect(data, "lockupViewModel", probe)
+            if (probe.isNotEmpty()) return html to data
+        }
+        throw NotAvailable("V playliste som nenašiel žiadne videá.")
     }
 
     private fun addItems(node: JSONObject, into: MutableMap<String, PlaylistItem>) {

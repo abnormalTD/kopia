@@ -17,6 +17,8 @@ Potrebuješ Android 10 alebo novší.
 - **Zdieľaj** video alebo playlist priamo z YouTube appky → vyber Kópiu. Alebo odkaz vlož ručne.
 - Prepínač **Stiahnuť celé video** — vypnutý = hudba, zapnutý = video (vyberieš kvalitu, pri každej vidíš veľkosť súboru).
 - **Playlisty** sa stiahnu celé, skladby sa očíslujú a v hudobnom prehrávači sa zoskupia ako album.
+- Keď playlist stiahneš znova, Kópia **dotiahne len nové pesničky** — nič nesťahuje dvakrát.
+- Rozbehnuté sťahovanie sa dá **zrušiť** v appke aj v notifikácii.
 - Sťahovanie beží na pozadí s notifikáciou — môžeš appku zavrieť, otočiť telefón alebo ho zamknúť.
 
 Súbory nájdeš v `Music/Kopia` a `Movies/Kopia` a hudobné prehrávače ich vidia hneď.

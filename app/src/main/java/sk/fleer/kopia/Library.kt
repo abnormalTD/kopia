@@ -82,16 +82,10 @@ object Library {
             put(MediaStore.MediaColumns.DISPLAY_NAME, name)
             put(MediaStore.MediaColumns.MIME_TYPE, if (isVideo) "video/mp4" else "audio/mp4")
             put(MediaStore.MediaColumns.RELATIVE_PATH, folder)
-            put(MediaStore.MediaColumns.TITLE, media.title)
+            // Artist, album and track number are not set here: MediaStore re-reads
+            // them from the file once it is finished, so they go into the file
+            // itself (Mp4Tags).
             put(MediaStore.MediaColumns.IS_PENDING, 1)
-            if (!isVideo) {
-                put(MediaStore.Audio.Media.ARTIST, media.author)
-                album?.let { put(MediaStore.Audio.Media.ALBUM, it) }
-                track?.let { put(MediaStore.Audio.Media.TRACK, it) }
-            }
-            if (media.seconds > 0) {
-                put(MediaStore.MediaColumns.DURATION, media.seconds * 1000)
-            }
         }
 
         val resolver = context.contentResolver

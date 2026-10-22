@@ -177,7 +177,14 @@ class DownloadService : Service() {
             while (true) {
                 val video = if (job.isVideo) pickVideo(media, job.height) else null
                 try {
-                    val path = fetch(media, video, slot, key) { fraction ->
+                    val tags = Mp4Tags.Tags(
+                        title = media.title,
+                        artist = media.author,
+                        album = job.album,
+                        track = track,
+                        trackCount = if (track != null) count else null,
+                    )
+                    val path = fetch(media, video, slot, key, tags) { fraction ->
                         update(prefix + media.title, index, count, fraction)
                     }
                     return Outcome.Saved(path)
@@ -205,6 +212,7 @@ class DownloadService : Service() {
         video: Stream?,
         slot: Library.Slot,
         key: String,
+        tags: Mp4Tags.Tags,
         onProgress: (Double) -> Unit,
     ): String {
         val work = File(cacheDir, "work").apply { mkdirs() }
@@ -228,6 +236,9 @@ class DownloadService : Service() {
                 // Already a valid M4A as downloaded - nothing to combine.
                 audioFile
             }
+            // Album, artist and track number only reach music players from
+            // inside the file; a refusal just means an untagged file.
+            Mp4Tags.write(result, tags)
             return Library.fill(this, slot, result, key)
         } finally {
             temps.forEach { it.delete() }

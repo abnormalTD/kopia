@@ -22,8 +22,8 @@ android {
         applicationId = "sk.fleer.kopia"
         minSdk = 29
         targetSdk = 35
-        versionCode = 120
-        versionName = "1.2"
+        versionCode = 130
+        versionName = "1.3"
     }
 
     signingConfigs {
